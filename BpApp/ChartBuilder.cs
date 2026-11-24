@@ -18,7 +18,7 @@ public static class ChartBuilder
     public static readonly Color PulseColor = Color.FromHex("#7F8C8D");
     public static readonly Color ExcludedColor = Color.FromHex("#E67E22");
 
-    public static void Build(Plot plot, List<Series> series, AnalysisSettings settings, ChartMode mode, Series selected)
+    public static void Build(Plot plot, List<Series> series, AnalysisSettings settings, ChartMode mode, IReadOnlyCollection<Series> selected)
     {
         plot.Clear();
         plot.Font.Automatic();
@@ -33,12 +33,16 @@ public static class ChartBuilder
         var hd = plot.Add.HorizontalLine(settings.HighDia);
         hd.LinePattern = LinePattern.Dashed; hd.Color = DiaColor.WithAlpha(0.35); hd.LineWidth = 1;
 
-        if (selected != null)
+        foreach (var sel in selected ?? Array.Empty<Series>())
         {
-            var pad = TimeSpan.FromMinutes(Math.Max(3, (selected.End - selected.Start).TotalMinutes * 0.3));
-            var span = plot.Add.HorizontalSpan((selected.Start - pad).ToOADate(), (selected.End + pad).ToOADate());
+            var pad = TimeSpan.FromMinutes(Math.Max(3, (sel.End - sel.Start).TotalMinutes * 0.3));
+            var span = plot.Add.HorizontalSpan((sel.Start - pad).ToOADate(), (sel.End + pad).ToOADate());
             span.FillStyle.Color = Color.FromHex("#F1C40F").WithAlpha(0.25);
             span.LineStyle.Width = 0;
+            // Полоса постоянной ширины в пикселях: видна при любом масштабе
+            var mark = plot.Add.VerticalLine(sel.Middle.ToOADate());
+            mark.Color = Color.FromHex("#F1C40F").WithAlpha(0.45);
+            mark.LineWidth = 12;
         }
 
         var all = series.SelectMany(s => s.Items).ToList();
@@ -83,6 +87,26 @@ public static class ChartBuilder
         if (items.Count == 0) return;
         var m = plot.Add.Markers(items.Select(i => i.Time.ToOADate()).ToArray(), items.Select(i => (double)y(i)).ToArray(), shape, size, color);
         if (legend != null) m.LegendText = legend;
+    }
+
+    /// <summary>
+    /// Подбирает видимую область так, чтобы все выбранные серии со всеми их замерами
+    /// поместились на график. Одна серия показывается как раньше: ±36 часов вокруг неё.
+    /// </summary>
+    public static void ZoomToSelection(Plot plot, List<Series> series, AnalysisSettings settings, IReadOnlyCollection<Series> selected)
+    {
+        if (selected == null || selected.Count == 0) return;
+        if (selected.Count == 1)
+        {
+            var s = selected.First();
+            var half = TimeSpan.FromHours(36);
+            Zoom(plot, series, settings, s.Middle - half, s.Middle + half);
+            return;
+        }
+        var from = selected.Min(s => s.Start);
+        var to = selected.Max(s => s.End);
+        var pad = TimeSpan.FromMinutes(Math.Max(30, (to - from).TotalMinutes * 0.05));
+        Zoom(plot, series, settings, from - pad, to + pad);
     }
 
     /// <summary>Показывает отрезок времени и подбирает шкалу давления по видимым замерам.</summary>
