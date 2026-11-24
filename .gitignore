@@ -1,0 +1,14 @@
+bin/
+obj/
+publish/
+*.user
+.vs/
+.idea/
+__pycache__/
+.venv/
+# Личные данные: замеры, отчёты, записи обмена с аппаратом
+*.awp
+*.pdf
+*.pcapng
+*.xlsx
+замеры_архив.csv
