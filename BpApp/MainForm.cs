@@ -18,7 +18,8 @@ public sealed class MainForm : Form
     readonly string archivePath;
     List<Measurement> archive = new();
     List<Series> series = new();
-    Series selected;
+    List<Series> selection = new();
+    bool syncingGrid;
 
     // Элементы окна
     readonly ToolStrip toolbar = new() { GripStyle = ToolStripGripStyle.Hidden, Padding = new Padding(6, 4, 6, 4) };
@@ -71,11 +72,12 @@ public sealed class MainForm : Form
         btnGoogle.Click += (_, _) => ExportForGoogle();
 
         // Левая часть: список серий. Правая: график сверху, состав серии снизу.
+        // Можно выделить несколько серий (Ctrl/Shift): график покажет их все сразу.
         gridSeries.SelectionChanged += (_, _) =>
         {
-            if (gridSeries.SelectedRows.Count == 0) return;
-            var no = (int)gridSeries.SelectedRows[0].Cells[0].Value;
-            SelectSeries(series.FirstOrDefault(s => s.No == no), zoom: gridSeries.Focused);
+            if (syncingGrid || gridSeries.SelectedRows.Count == 0) return;
+            var nos = gridSeries.SelectedRows.Cast<DataGridViewRow>().Select(r => (int)r.Cells[0].Value).ToHashSet();
+            SelectSeries(series.Where(s => nos.Contains(s.No)).ToList(), zoom: gridSeries.Focused, syncGrid: false);
         };
 
         var bottom = new Panel { Dock = DockStyle.Fill };
@@ -106,7 +108,7 @@ public sealed class MainForm : Form
     {
         Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
         AllowUserToResizeRows = false, RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-        MultiSelect = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells,
+        MultiSelect = true, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells,
         BackgroundColor = System.Drawing.Color.White, BorderStyle = BorderStyle.None,
     };
 
@@ -168,9 +170,14 @@ public sealed class MainForm : Form
     {
         series = Analysis.Analyze(archive, settings);
         FillSeriesGrid();
-        DrawPlot(resetView: selected == null);
-        if (selected != null)
-            SelectSeries(series.FirstOrDefault(s => s.Start == selected.Start) ?? series.LastOrDefault(), zoom: false);
+        DrawPlot(resetView: selection.Count == 0);
+        if (selection.Count > 0)
+        {
+            var starts = selection.Select(s => s.Start).ToHashSet();
+            var again = series.Where(s => starts.Contains(s.Start)).ToList();
+            if (again.Count == 0 && series.Count > 0) again.Add(series[^1]);
+            SelectSeries(again, zoom: false);
+        }
     }
 
     // ---------- Источники ----------
@@ -260,47 +267,71 @@ public sealed class MainForm : Form
         gridSeries.ResumeLayout();
     }
 
-    void FillItemsGrid(Series s)
+    void FillItemsGrid(List<Series> sel)
     {
         gridItems.Columns.Clear();
         gridItems.Rows.Clear();
-        if (s == null) { lblSeries.Text = ""; return; }
+        if (sel.Count == 0) { lblSeries.Text = ""; return; }
+        bool many = sel.Count > 1;
         foreach (var h in new[] { "Время", "SYS", "DIA", "Пульс", "MAP", "В среднем", "Источник" })
             gridItems.Columns.Add(h, h);
-        foreach (var m in s.Items)
-        {
-            int r = gridItems.Rows.Add(m.Time.ToString("HH:mm"), m.Sys, m.Dia, m.Pulse, m.Map,
-                m.Excluded == Exclusion.None ? "учтён" : $"нет: {m.ExcludedText}", m.Source);
-            if (m.Excluded != Exclusion.None)
+        var shade = System.Drawing.Color.FromArgb(0xF2, 0xF4, 0xF7);
+        for (int i = 0; i < sel.Count; i++)
+            foreach (var m in sel[i].Items)
             {
-                gridItems.Rows[r].DefaultCellStyle.ForeColor = System.Drawing.Color.Gray;
-                gridItems.Rows[r].DefaultCellStyle.Font = new Font(gridItems.Font, FontStyle.Strikeout);
+                int r = gridItems.Rows.Add(m.Time.ToString(many ? "dd.MM HH:mm" : "HH:mm"), m.Sys, m.Dia, m.Pulse, m.Map,
+                    m.Excluded == Exclusion.None ? "учтён" : $"нет: {m.ExcludedText}", m.Source);
+                var row = gridItems.Rows[r];
+                if (many && i % 2 == 1) row.DefaultCellStyle.BackColor = shade; // соседние серии чередуются фоном
+                if (m.Excluded != Exclusion.None)
+                {
+                    row.DefaultCellStyle.ForeColor = System.Drawing.Color.Gray;
+                    row.DefaultCellStyle.Font = new Font(gridItems.Font, FontStyle.Strikeout);
+                }
             }
+        if (!many)
+        {
+            var s = sel[0];
+            lblSeries.Text = $"Серия {s.Date:dd.MM.yyyy} {s.Start:HH:mm}–{s.End:HH:mm}: среднее {s.SysClean:0.#}/{s.DiaClean:0.#}, " +
+                             $"пульс {s.PulseClean:0} (учтено {s.Used.Count} из {s.Items.Count}).  Простое среднее всех: {s.SysMean:0.#}/{s.DiaMean:0.#}." +
+                             (s.Notes.Count > 0 ? $"\n{s.NotesText}" : "");
+            return;
         }
-        lblSeries.Text = $"Серия {s.Date:dd.MM.yyyy} {s.Start:HH:mm}–{s.End:HH:mm}: среднее {s.SysClean:0.#}/{s.DiaClean:0.#}, " +
-                         $"пульс {s.PulseClean:0} (учтено {s.Used.Count} из {s.Items.Count}).  Простое среднее всех: {s.SysMean:0.#}/{s.DiaMean:0.#}." +
-                         (s.Notes.Count > 0 ? $"\n{s.NotesText}" : "");
+        int total = sel.Sum(s => s.Items.Count), used = sel.Sum(s => s.Used.Count);
+        lblSeries.Text = $"Выбрано серий: {sel.Count}, с {sel[0].Start:dd.MM.yyyy HH:mm} по {sel[^1].End:dd.MM.yyyy HH:mm}. " +
+                         $"Среднее по сериям: {sel.Average(s => s.SysClean):0.#}/{sel.Average(s => s.DiaClean):0.#}, " +
+                         $"пульс {sel.Average(s => s.PulseClean):0} (учтено замеров {used} из {total})." +
+                         $"\nДиапазон средних: SYS {sel.Min(s => s.SysClean):0.#}–{sel.Max(s => s.SysClean):0.#}, " +
+                         $"DIA {sel.Min(s => s.DiaClean):0.#}–{sel.Max(s => s.DiaClean):0.#}.";
     }
 
-    void SelectSeries(Series s, bool zoom)
+    void SelectSeries(List<Series> sel, bool zoom, bool syncGrid = true)
     {
-        selected = s;
-        FillItemsGrid(s);
-        if (s == null) { DrawPlot(); return; }
-        if (zoom)
-        {
-            var half = TimeSpan.FromHours(36);
-            ZoomTo(s.Middle - half, s.Middle + half, redraw: false);
-        }
+        selection = sel.OrderBy(s => s.Start).ToList();
+        FillItemsGrid(selection);
+        if (selection.Count > 0 && zoom)
+            ChartBuilder.ZoomToSelection(plotView.Plot, series, settings, selection);
         DrawPlot();
+        if (!syncGrid) return;
         // Синхронизировать выделение в списке, не вызывая повторного зума
-        foreach (DataGridViewRow row in gridSeries.Rows)
-            if ((int)row.Cells[0].Value == s.No && !row.Selected)
+        var nos = selection.Select(s => s.No).ToHashSet();
+        syncingGrid = true;
+        try
+        {
+            var rows = gridSeries.Rows.Cast<DataGridViewRow>().Where(r => nos.Contains((int)r.Cells[0].Value)).ToList();
+            // Смена текущей ячейки сбрасывает выделение, поэтому сначала она, потом выделение
+            if (rows.Count > 0 && (gridSeries.CurrentRow == null || !rows.Contains(gridSeries.CurrentRow)))
+                gridSeries.CurrentCell = rows[0].Cells[1];
+            foreach (DataGridViewRow row in gridSeries.Rows)
+                row.Selected = nos.Contains((int)row.Cells[0].Value);
+            if (rows.Count > 0)
             {
-                row.Selected = true;
-                gridSeries.FirstDisplayedScrollingRowIndex = Math.Max(0, row.Index - 3);
-                break;
+                int top = gridSeries.FirstDisplayedScrollingRowIndex;
+                if (rows[0].Index < top || rows[0].Index >= top + gridSeries.DisplayedRowCount(false))
+                    gridSeries.FirstDisplayedScrollingRowIndex = Math.Max(0, rows[0].Index - 3);
             }
+        }
+        finally { syncingGrid = false; }
     }
 
     // ---------- График ----------
@@ -310,7 +341,7 @@ public sealed class MainForm : Form
         var plot = plotView.Plot;
         var limits = plot.Axes.GetLimits();
         bool hadData = plot.GetPlottables().Any();
-        ChartBuilder.Build(plot, series, settings, (ChartMode)cbView.SelectedIndex, selected);
+        ChartBuilder.Build(plot, series, settings, (ChartMode)cbView.SelectedIndex, selection);
         if (series.Count > 0)
         {
             if (resetView || !hadData)
@@ -362,7 +393,15 @@ public sealed class MainForm : Form
     {
         if (e.Button != MouseButtons.Left) return;
         var s = SeriesAt(e.X, e.Y);
-        if (s != null) SelectSeries(s, zoom: false);
+        if (s == null) return;
+        // Щелчок с Ctrl добавляет серию к выбранным или убирает её
+        if (ModifierKeys.HasFlag(Keys.Control))
+        {
+            var sel = selection.Where(x => x.No != s.No).ToList();
+            if (sel.Count == selection.Count) sel.Add(s);
+            SelectSeries(sel, zoom: false);
+        }
+        else SelectSeries(new List<Series> { s }, zoom: false);
     }
 
     static string Describe(Series s)
